@@ -74,6 +74,8 @@ PointToPlaneWithCovErrorMinimizer<T>::estimateCovariance(const ErrorElements& mP
 {
     const int max_nbr_point = mPts.reading.getNbPoints();
 
+    Matrix bonnabel_cov(Matrix::Zero(6,6)); 
+    Matrix censi_cov(Matrix::Zero(6,6));
     Matrix covariance(Matrix::Zero(6,6));
     Matrix J_hessian(Matrix::Zero(6,6));
     Matrix d2J_dReadingdX(Matrix::Zero(6, max_nbr_point));
@@ -84,69 +86,48 @@ PointToPlaneWithCovErrorMinimizer<T>::estimateCovariance(const ErrorElements& mP
     Vector normal(3);
     Vector reading_direction(Vector::Zero(3));
     Vector reference_direction(Vector::Zero(3));
-
-    //TODO: should be constView
-    Matrix normals = mPts.reference.getDescriptorViewByName("normals");
-
-    if (normals.rows() < 3)    // Make sure there are normals in DataPoints
-        return std::numeric_limits<T>::max() * Matrix::Identity(6,6);
-
-    T beta = -asin(transformation(2,0));
-    T alpha = atan2(transformation(2,1), transformation(2,2));
-    T gamma = atan2(transformation(1,0)/cos(beta), transformation(0,0)/cos(beta));
-    T t_x = transformation(0,3);
-    T t_y = transformation(1,3);
-    T t_z = transformation(2,3);
-
     Vector tmp_vector_6(Vector::Zero(6));
 
-    int valid_points_count = 0;
+    Matrix d2J_dZdX_bias_reading(Matrix::Zero(6, 1));
+    Matrix d2J_dZdX_bias_reference(Matrix::Zero(6, 1));
 
-    //TODO: add missing const
+    Matrix normals = mPts.reference.getDescriptorViewByName("normals");
+
+    int valid_points_count = 0;
     for(int i = 0; i < max_nbr_point; ++i)
     {
-        //if (outlierWeights(0,i) > 0.0)
-        {
             reading_point = mPts.reading.features.block(0,i,3,1);
-            //int reference_idx = matches.ids(0,i);
             reference_point = mPts.reference.features.block(0,i,3,1);
 
             normal = normals.block(0,i,3,1);
-
+      T weight = mPts.weights(0, i);
             T reading_range = reading_point.norm();
             reading_direction = reading_point / reading_range;
             T reference_range = reference_point.norm();
             reference_direction = reference_point / reference_range;
 
-            T n_alpha = normal(2)*reading_direction(1) - normal(1)*reading_direction(2);
-            T n_beta = normal(0)*reading_direction(2) - normal(2)*reading_direction(0);
-            T n_gamma = normal(1)*reading_direction(0) - normal(0)*reading_direction(1);
-
-            T E = normal(0)*(reading_point(0) - gamma*reading_point(1) + beta*reading_point(2) + t_x - reference_point(0));
-            E +=  normal(1)*(gamma*reading_point(0) + reading_point(1) - alpha*reading_point(2) + t_y - reference_point(1));
-            E +=  normal(2)*(-beta*reading_point(0) + alpha*reading_point(1) + reading_point(2) + t_z - reference_point(2));
-
-            T N_reading = normal(0)*(reading_direction(0) - gamma*reading_direction(1) + beta*reading_direction(2));
-            N_reading +=  normal(1)*(gamma*reading_direction(0) + reading_direction(1) - alpha*reading_direction(2));
-            N_reading +=  normal(2)*(-beta*reading_direction(0) + alpha*reading_direction(1) + reading_direction(2));
-
-            T N_reference = -(normal(0)*reference_direction(0) + normal(1)*reference_direction(1) + normal(2)*reference_direction(2));
+      Vector tmp_vector_3 =  transformation.block(0,0,3,3) * reference_point + transformation.block(0,3,3,1);
+            T n_alpha = normal(2)*tmp_vector_3(1) - normal(1)*tmp_vector_3(2);
+            T n_beta = normal(0)*tmp_vector_3(2) - normal(2)*tmp_vector_3(0);
+            T n_gamma = normal(1)*tmp_vector_3(0) - normal(0)*tmp_vector_3(1);
 
             // update the hessian and d2J/dzdx
-            tmp_vector_6 << normal(0), normal(1), normal(2), reading_range * n_alpha, reading_range * n_beta, reading_range * n_gamma;
-
+            tmp_vector_6 << reading_range * n_alpha, reading_range * n_beta, reading_range * n_gamma, normal(0), normal(1), normal(2);
+      tmp_vector_6 *= weight;
             J_hessian += tmp_vector_6 * tmp_vector_6.transpose();
 
-            tmp_vector_6 << normal(0) * N_reading, normal(1) * N_reading, normal(2) * N_reading, n_alpha * (E + reading_range * N_reading), n_beta * (E + reading_range * N_reading), n_gamma * (E + reading_range * N_reading);
+      T tmp_scalar_read = normal(0) * reading_direction(0) + normal(1) * reading_direction(1) + normal(2) * reading_direction(2);
+      tmp_scalar_read = 1;
+      tmp_scalar_read *= weight;
+      d2J_dReadingdX.block(0,valid_points_count,6,1) = tmp_vector_6*tmp_scalar_read;
+      d2J_dZdX_bias_reading += tmp_vector_6*tmp_scalar_read;
 
-            d2J_dReadingdX.block(0,valid_points_count,6,1) = tmp_vector_6;
-
-            tmp_vector_6 << normal(0) * N_reference, normal(1) * N_reference, normal(2) * N_reference, reference_range * n_alpha * N_reference, reference_range * n_beta * N_reference, reference_range * n_gamma * N_reference;
-
-            d2J_dReferencedX.block(0,valid_points_count,6,1) = tmp_vector_6;
-
+      T tmp_scalar_ref = normal(0) * reference_direction(0) + normal(1) * reference_direction(1) + normal(2) * reference_direction(2);
+      tmp_scalar_ref = 1;
+      tmp_scalar_ref *= weight;
+            d2J_dReferencedX.block(0,valid_points_count, 6,1) = tmp_vector_6*tmp_scalar_ref;
+            d2J_dZdX_bias_reference += tmp_vector_6*tmp_scalar_ref;
             valid_points_count++;
-        } // if (outlierWeights(0,i) > 0.0)
     }
 
     Matrix d2J_dZdX(Matrix::Zero(6, 2 * valid_points_count));
@@ -156,9 +137,13 @@ PointToPlaneWithCovErrorMinimizer<T>::estimateCovariance(const ErrorElements& mP
     Matrix inv_J_hessian = J_hessian.inverse();
 
     covariance = d2J_dZdX * d2J_dZdX.transpose();
-    covariance = inv_J_hessian * covariance * inv_J_hessian;
+    censi_cov = inv_J_hessian * covariance * inv_J_hessian;
+  bonnabel_cov = Matrix::Zero(6,6);
+  bonnabel_cov += inv_J_hessian * d2J_dZdX_bias_reading * d2J_dZdX_bias_reading.transpose() * inv_J_hessian;
+    bonnabel_cov += inv_J_hessian * d2J_dZdX_bias_reference * d2J_dZdX_bias_reference.transpose() * inv_J_hessian;
+  bonnabel_cov += censi_cov;
 
-    return (sensorStdDev * sensorStdDev) * covariance;
+  return bonnabel_cov;
 }
 
 
